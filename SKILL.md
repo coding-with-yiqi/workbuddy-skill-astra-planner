@@ -3,7 +3,7 @@ name: astra-planner
 description: 动手前先用 Codex CLI 的 Astra 模型(gpt-6-astra)把任务编译成「傻瓜级方案 + 可运行的自检 harness + 可机器判定的成功标准」，拿到之后再照方案执行。用户要求任何实质性任务开工前先跑一遍；触发词包括「问 Astra」「先规划一下」「开工前」「astra」「make a plan」。
 description_zh: "开工前用 Astra 编译方案与自检 harness，再照方案执行"
 description_en: "Compile a foolproof plan + self-verification harness via Codex Astra before executing any real task"
-version: 1.2.1
+version: 1.2.2
 display_name: "astra-planner"
 display_name_en: "astra-planner"
 visibility: "public"

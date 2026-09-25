@@ -32,29 +32,52 @@ PROXY_SOURCE=""
 
 proxy_alive() {
   [ -n "${1:-}" ] || return 1
-  curl --proxy "$1" --noproxy '' --connect-timeout 3 --max-time 8 \
-    -sS -o /dev/null "$PROBE_URL" >/dev/null 2>&1
+  local code rc attempt
+  # 失败就再试一次：SOCKS 握手 + TLS 首次连接偶尔会顶到超时上限，
+  # 一次抖动不该让我们把好用的代理判成不可用。
+  for attempt in 1 2; do
+    code="$(curl --proxy "$1" --noproxy '' --connect-timeout 3 --max-time 8 \
+      -sS -o /dev/null -w '%{http_code}' "$PROBE_URL" 2>/dev/null)"
+    rc=$?
+    [ "$rc" -eq 0 ] || continue
+    # 光看退出码不够：代理自己报错时 curl 照样退出 0。所以还要看状态码——
+    #   000 连不上 / 407 要代理认证 / 502·503·504 代理自己报的错（宿主注入的常是这个）
+    # 而 403 是 chatgpt.com 对 curl 的正常回绝，说明代理其实通了，不算失败。
+    case "$code" in
+      000|407|502|503|504) continue ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # macOS 读系统代理；Linux 没有 scutil，这里自然返回空，落到后面的环境变量候选。
 system_proxy_candidates() {
   command -v scutil >/dev/null 2>&1 || return 0
-  local cfg host port
+  local cfg host port socks="" en hp pp
   cfg="$(scutil --proxy 2>/dev/null)" || return 0
   [ -n "$cfg" ] || return 0
   sp_field() { printf '%s\n' "$cfg" | awk -v k="$1" '$1 == k {print $3; exit}'; }
-  if [ "$(sp_field HTTPSEnable)" = "1" ]; then
-    host="$(sp_field HTTPSProxy)"; port="$(sp_field HTTPSPort)"
-    [ -n "$host" ] && [ -n "$port" ] && printf 'http://%s:%s\n' "$host" "$port"
-  fi
-  if [ "$(sp_field HTTPEnable)" = "1" ]; then
-    host="$(sp_field HTTPProxy)"; port="$(sp_field HTTPPort)"
-    [ -n "$host" ] && [ -n "$port" ] && printf 'http://%s:%s\n' "$host" "$port"
-  fi
+
+  # SOCKS 放最前面：翻墙客户端常把 HTTP/HTTPS/SOCKS 指向同一个混合端口，
+  # 这种端口按 http:// 形式探测必然超时，只有 socks5h:// 才连得上。
   if [ "$(sp_field SOCKSEnable)" = "1" ]; then
     host="$(sp_field SOCKSProxy)"; port="$(sp_field SOCKSPort)"
-    [ -n "$host" ] && [ -n "$port" ] && printf 'socks5h://%s:%s\n' "$host" "$port"
+    if [ -n "$host" ] && [ -n "$port" ]; then
+      socks="socks5h://${host}:${port}"
+      printf '%s\n' "$socks"
+    fi
   fi
+
+  # 再补 HTTP/HTTPS；与 SOCKS 同一个端口的就跳过，别白等一次超时
+  for en in HTTPSEnable HTTPEnable; do
+    [ "$(sp_field "$en")" = "1" ] || continue
+    if [ "$en" = "HTTPSEnable" ]; then hp="HTTPSProxy"; pp="HTTPSPort"; else hp="HTTPProxy"; pp="HTTPPort"; fi
+    host="$(sp_field "$hp")"; port="$(sp_field "$pp")"
+    [ -n "$host" ] && [ -n "$port" ] || continue
+    [ -n "$socks" ] && [ "$socks" = "socks5h://${host}:${port}" ] && continue
+    printf 'http://%s:%s\n' "$host" "$port"
+  done
 }
 
 # 只在真的要调 Codex 时才解析代理：--check / --validate-only 不该被网络卡住。
@@ -99,7 +122,7 @@ EOF
 
   if [ -z "$PROXY" ]; then
     echo "No usable proxy found" >&2
-    echo "  Codex 需要能访问 $PROBE_URL，但所有候选代理都连不上。按序排查：" >&2
+    echo "  Codex 需要能访问 ${PROBE_URL}，但所有候选代理都连不上。按序排查：" >&2
     echo "  1) 显式指定：export ASTRA_PROXY=http://<你的代理地址>:<端口>" >&2
     echo "  2) 没开系统代理就先打开；macOS 上用 scutil --proxy 看当前端口。" >&2
     echo "  3) 注意宿主注入的代理环境变量——它可能存在但并不真的通。" >&2
