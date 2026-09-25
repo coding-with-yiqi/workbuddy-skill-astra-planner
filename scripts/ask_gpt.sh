@@ -17,23 +17,102 @@ else
 fi
 MODEL="${ASTRA_MODEL:-gpt-6-astra}"
 EFFORT="${ASTRA_EFFORT:-xhigh}"
-# 代理不写死：优先 ASTRA_PROXY，其次标准 HTTPS_PROXY/https_proxy，都没有就报错退出。
-# （不同机器、不同翻墙工具的端口都不一样，写死默认值等于把个人信息塞进仓库）
-PROXY="${ASTRA_PROXY:-${HTTPS_PROXY:-${https_proxy:-}}}"
-if [ -z "$PROXY" ]; then
-  echo "ERROR: 未设置代理。Codex 需要能访问 chatgpt.com。" >&2
-  echo "       请先执行：export ASTRA_PROXY=http://<你的代理地址>:<端口>" >&2
-  exit 1
-fi
 SANDBOX="${ASTRA_SANDBOX:-read-only}"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(pwd)"
 
-# Codex 必须走用户自己的翻墙代理；工作台注入的代理到不了 chatgpt.com
-# 六个代理变量全部指向同一个代理，绕过类变量一律清空（契约里写死，避免被反复改动）
-export HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" ALL_PROXY="$PROXY"
-export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
-unset NO_PROXY no_proxy
+# ---------- 代理解析 ----------
+# 为什么要"真连一次"而不是直接用环境变量：宿主（比如工作台）常常往 shell 里注入
+# 自己的代理变量，而那个代理未必真能访问 Codex 后端（典型症状：连上就 502）。
+# 直接信它，用户只会看到一个不知所以的失败。所以这里按优先级逐个候选探测，
+# 用第一个真的通的。优先级：ASTRA_PROXY > macOS 系统代理 > 标准环境变量。
+PROBE_URL="https://chatgpt.com/"
+PROXY=""
+PROXY_SOURCE=""
+
+proxy_alive() {
+  [ -n "${1:-}" ] || return 1
+  curl --proxy "$1" --noproxy '' --connect-timeout 3 --max-time 8 \
+    -sS -o /dev/null "$PROBE_URL" >/dev/null 2>&1
+}
+
+# macOS 读系统代理；Linux 没有 scutil，这里自然返回空，落到后面的环境变量候选。
+system_proxy_candidates() {
+  command -v scutil >/dev/null 2>&1 || return 0
+  local cfg host port
+  cfg="$(scutil --proxy 2>/dev/null)" || return 0
+  [ -n "$cfg" ] || return 0
+  sp_field() { printf '%s\n' "$cfg" | awk -v k="$1" '$1 == k {print $3; exit}'; }
+  if [ "$(sp_field HTTPSEnable)" = "1" ]; then
+    host="$(sp_field HTTPSProxy)"; port="$(sp_field HTTPSPort)"
+    [ -n "$host" ] && [ -n "$port" ] && printf 'http://%s:%s\n' "$host" "$port"
+  fi
+  if [ "$(sp_field HTTPEnable)" = "1" ]; then
+    host="$(sp_field HTTPProxy)"; port="$(sp_field HTTPPort)"
+    [ -n "$host" ] && [ -n "$port" ] && printf 'http://%s:%s\n' "$host" "$port"
+  fi
+  if [ "$(sp_field SOCKSEnable)" = "1" ]; then
+    host="$(sp_field SOCKSProxy)"; port="$(sp_field SOCKSPort)"
+    [ -n "$host" ] && [ -n "$port" ] && printf 'socks5h://%s:%s\n' "$host" "$port"
+  fi
+}
+
+# 只在真的要调 Codex 时才解析代理：--check / --validate-only 不该被网络卡住。
+resolve_proxy() {
+  local candidates="" sys_candidates="" cand v seen=" "
+
+  if [ -n "${ASTRA_PROXY:-}" ]; then
+    # 显式指定就完全信用户：连不通直接退出，不偷偷回退到别的候选。
+    if proxy_alive "$ASTRA_PROXY"; then
+      PROXY="$ASTRA_PROXY"; PROXY_SOURCE="ASTRA_PROXY"
+    else
+      echo "ERROR: ASTRA_PROXY 指定的代理连不通 $PROBE_URL" >&2
+      echo "       检查代理是否在跑、地址是否正确；或 unset ASTRA_PROXY 让它自动探测。" >&2
+      exit 1
+    fi
+  else
+    sys_candidates="$(system_proxy_candidates)"
+    candidates="$sys_candidates"
+    for v in "${HTTPS_PROXY:-}" "${https_proxy:-}" "${HTTP_PROXY:-}" "${http_proxy:-}" "${ALL_PROXY:-}" "${all_proxy:-}"; do
+      [ -n "$v" ] && candidates+="${candidates:+$'\n'}${v}"
+    done
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      case "$seen" in *" $cand "*) continue ;; esac
+      seen="${seen}${cand} "
+      if proxy_alive "$cand"; then
+        PROXY="$cand"
+        case "
+$sys_candidates
+" in
+          *"
+$cand
+"*) PROXY_SOURCE="macOS 系统代理" ;;
+          *) PROXY_SOURCE="环境变量" ;;
+        esac
+        break
+      fi
+    done <<EOF
+$candidates
+EOF
+  fi
+
+  if [ -z "$PROXY" ]; then
+    echo "No usable proxy found" >&2
+    echo "  Codex 需要能访问 $PROBE_URL，但所有候选代理都连不上。按序排查：" >&2
+    echo "  1) 显式指定：export ASTRA_PROXY=http://<你的代理地址>:<端口>" >&2
+    echo "  2) 没开系统代理就先打开；macOS 上用 scutil --proxy 看当前端口。" >&2
+    echo "  3) 注意宿主注入的代理环境变量——它可能存在但并不真的通。" >&2
+    exit 1
+  fi
+
+  # 六个代理变量统一指向同一个值，绕过类变量一律清空。
+  # 只报来源不打印完整地址（地址里可能含凭据）。
+  export HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" ALL_PROXY="$PROXY"
+  export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
+  unset NO_PROXY no_proxy
+  echo "[代理] 来源: ${PROXY_SOURCE}"
+}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -240,6 +319,9 @@ echo "[1/3] 收集上下文快照 -> $OUT/context.md"
   cat "$TASK"
 } > "$OUT/prompt.md"
 
+# 只有这条路会联网，所以在这里才解析代理（否则 --check 也会被网络卡住）
+resolve_proxy
+
 echo "[2/3] 正在问 Astra（${MODEL}, effort=${EFFORT}）…"
 # 默认保留会话（可在 ~/.codex/sessions 里查到）；设 ASTRA_EPHEMERAL=1 才不落盘
 EPHEMERAL_FLAG=""
@@ -251,6 +333,12 @@ EPHEMERAL_FLAG=""
 rc=$?
 [ "$rc" -ne 0 ] && { echo "codex 退出码 ${rc}，日志: $OUT/codex.log"; tail -15 "$OUT/codex.log"; }
 
+# 兜底：个别 Codex CLI 版本（或降级路径）不会真的写 -o 指定的文件，
+# 但内容还在它的输出里 —— 这时把输出捞回来，别让一次编译白跑。
+if [ "$rc" -eq 0 ] && [ ! -s "$OUT/PLAN.md" ] && [ -s "$OUT/codex.log" ]; then
+  cp "$OUT/codex.log" "$OUT/PLAN.md"
+fi
+
 echo "[3/3] 校验章节契约 + 提取 harness"
 post_process "$OUT/PLAN.md" "$OUT"; vrc=$?
 
@@ -260,7 +348,8 @@ post_process "$OUT/PLAN.md" "$OUT"; vrc=$?
   echo "validation_exit=$vrc"
   echo "model=$MODEL"
   echo "effort=$EFFORT"
-  echo "proxy=$PROXY"
+  # 只记来源不记地址：代理地址里可能带凭据，不该落进任何产物文件
+  echo "proxy=${PROXY_SOURCE}"
   # 按记录数统计（与 awk 'END{print NR}' 一致），避免末尾无换行时差一行
   # 按记录数统计（与 awk 'END{print NR}' 一致），避免末尾无换行时差一行
   echo "plan_lines=$(awk 'END{print NR+0}' "$OUT/PLAN.md" 2>/dev/null)"

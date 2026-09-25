@@ -3,7 +3,7 @@ name: astra-planner
 description: 动手前先用 Codex CLI 的 Astra 模型(gpt-6-astra)把任务编译成「傻瓜级方案 + 可运行的自检 harness + 可机器判定的成功标准」，拿到之后再照方案执行。用户要求任何实质性任务开工前先跑一遍；触发词包括「问 Astra」「先规划一下」「开工前」「astra」「make a plan」。
 description_zh: "开工前用 Astra 编译方案与自检 harness，再照方案执行"
 description_en: "Compile a foolproof plan + self-verification harness via Codex Astra before executing any real task"
-version: 1.2.0
+version: 1.2.1
 display_name: "astra-planner"
 display_name_en: "astra-planner"
 visibility: "public"
@@ -78,15 +78,36 @@ harness 运行时 cwd = 输出目录，并导出 `ASTRA_OUT`（输出目录）�
 4. 模具清单里的东西要真的落盘，不能只在方案里提一句。
 5. 对用户说"我在问 Astra"，不要说"在跑脚本"或"在调 Codex"。
 
+## 代理解析与排错
+
+调用 Codex 之前，脚本会自己挑一个**真的能通**的代理，顺序如下：
+
+| 优先级 | 候选来源 | 行为 |
+| --- | --- | --- |
+| 1 | `ASTRA_PROXY` | 设了就只用它；连不通**直接报错退出**，不偷偷回退（否则你以为在用自己设的那个） |
+| 2 | macOS 系统代理 | `scutil --proxy` 读出 HTTPS / HTTP / SOCKS；Linux 没有 `scutil`，这一步自然跳过 |
+| 3 | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 及小写形式 | 兜底候选 |
+
+每个候选都会用 `curl --proxy <候选> --connect-timeout 3 --max-time 8` 真的连一次 `https://chatgpt.com/`，取第一个通的；候选先去重再逐个试。选中之后写进六个代理变量再启动 Codex，**日志只打印来源（如 `macOS 系统代理`），不打印完整地址** —— 地址里可能带凭据。
+
+全部候选都不通时：打印 `No usable proxy found` 并以非零码退出，**完全不调用 Codex**，不会白跑一次编译。
+
+为什么不能直接读环境变量：宿主常常会注入自己的代理变量，而那个代理未必通（典型症状 502）。只信它，用户会卡在"配置齐全却跑不通"的状态里不知所以。
+
+```bash
+scutil --proxy            # macOS：看系统代理有没有开、端口多少
+unset ASTRA_PROXY         # 回到自动探测
+```
+
 ## 排错
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |
-| `Proxy connection failed: 502` | shell 里被注入的工作台代理不通 Codex | 脚本要求显式设置代理（`ASTRA_PROXY`，或标准 `HTTPS_PROXY`）；没设置会直接报错退出，不会猜 |
+| `Proxy connection failed: 502` | 环境变量指向的代理其实不通 Codex | 脚本会自动跳过它继续试别的候选；全都不通则打印 `No usable proxy found` 并退出 |
 | `failed to refresh available models: timeout` | 网络抖动 | 忽略，不影响主流程 |
 | 方案缺章节 | 模型偷懒 | 脚本会报 MISSING，重跑一次；仍缺就在 PLAN.md 里手工补 |
 | 自检时触发批量删除拦截 | harness 把临时目录建在工作区里，清理累计触发保护 | 契约已要求用系统临时目录；若旧方案仍这样，把输出目录拷到 `/tmp` 下再 `--check` |
 
 ## 可调参数（环境变量）
 
-`ASTRA_MODEL`(默认 gpt-6-astra) · `ASTRA_EFFORT`(默认 xhigh) · `ASTRA_PROXY`(必填；也可用标准 `HTTPS_PROXY`) · `ASTRA_SANDBOX`(默认 read-only) · `ASTRA_EPHEMERAL`(默认不设，即会话落盘) · `CODEX_BIN`(默认按 PATH 查找 codex)
+`ASTRA_MODEL`(默认 gpt-6-astra) · `ASTRA_EFFORT`(默认 xhigh) · `ASTRA_PROXY`(留空即自动探测) · `ASTRA_SANDBOX`(默认 read-only) · `ASTRA_EPHEMERAL`(默认不设，即会话落盘) · `CODEX_BIN`(默认按 PATH 查找 codex)
