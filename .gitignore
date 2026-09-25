@@ -1,0 +1,13 @@
+# 运行产物：都是本机一次性的，不该进仓库
+codex.log
+context.md
+run.status
+prompt.md
+PLAN.md
+harness/
+.astra/
+dist/
+
+.DS_Store
+*.tmp
+*.zip
