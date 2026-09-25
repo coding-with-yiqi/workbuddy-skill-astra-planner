@@ -21,120 +21,33 @@ SANDBOX="${ASTRA_SANDBOX:-read-only}"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(pwd)"
 
-# ---------- 代理解析 ----------
-# 为什么要"真连一次"而不是直接用环境变量：宿主（比如工作台）常常往 shell 里注入
-# 自己的代理变量，而那个代理未必真能访问 Codex 后端（典型症状：连上就 502）。
-# 直接信它，用户只会看到一个不知所以的失败。所以这里按优先级逐个候选探测，
-# 用第一个真的通的。优先级：ASTRA_PROXY > macOS 系统代理 > 标准环境变量。
+# ---------- 代理 ----------
+# 脚本不替你探测"哪个代理能通"。这件事因机器而异：混合端口只认 SOCKS、
+# 宿主注入的变量可能返回 502、公司代理要认证……写死在脚本里等于替用户猜，
+# 猜错了反而更难查。所以找代理是执行者的活（见 SKILL.md「开工前：先把代理接通」），
+# 脚本只负责：按顺序取第一个非空变量 → 统一导出 → 没有就带着排查指引退出。
 PROBE_URL="https://chatgpt.com/"
 PROXY=""
-PROXY_SOURCE=""
+PROXY_KIND=""
 
-proxy_alive() {
-  [ -n "${1:-}" ] || return 1
-  local code rc attempt
-  # 失败就再试一次：SOCKS 握手 + TLS 首次连接偶尔会顶到超时上限，
-  # 一次抖动不该让我们把好用的代理判成不可用。
-  for attempt in 1 2; do
-    code="$(curl --proxy "$1" --noproxy '' --connect-timeout 3 --max-time 8 \
-      -sS -o /dev/null -w '%{http_code}' "$PROBE_URL" 2>/dev/null)"
-    rc=$?
-    [ "$rc" -eq 0 ] || continue
-    # 光看退出码不够：代理自己报错时 curl 照样退出 0。所以还要看状态码——
-    #   000 连不上 / 407 要代理认证 / 502·503·504 代理自己报的错（宿主注入的常是这个）
-    # 而 403 是 chatgpt.com 对 curl 的正常回绝，说明代理其实通了，不算失败。
-    case "$code" in
-      000|407|502|503|504) continue ;;
-      *) return 0 ;;
-    esac
-  done
-  return 1
-}
-
-# macOS 读系统代理；Linux 没有 scutil，这里自然返回空，落到后面的环境变量候选。
-system_proxy_candidates() {
-  command -v scutil >/dev/null 2>&1 || return 0
-  local cfg host port socks="" en hp pp
-  cfg="$(scutil --proxy 2>/dev/null)" || return 0
-  [ -n "$cfg" ] || return 0
-  sp_field() { printf '%s\n' "$cfg" | awk -v k="$1" '$1 == k {print $3; exit}'; }
-
-  # SOCKS 放最前面：翻墙客户端常把 HTTP/HTTPS/SOCKS 指向同一个混合端口，
-  # 这种端口按 http:// 形式探测必然超时，只有 socks5h:// 才连得上。
-  if [ "$(sp_field SOCKSEnable)" = "1" ]; then
-    host="$(sp_field SOCKSProxy)"; port="$(sp_field SOCKSPort)"
-    if [ -n "$host" ] && [ -n "$port" ]; then
-      socks="socks5h://${host}:${port}"
-      printf '%s\n' "$socks"
-    fi
-  fi
-
-  # 再补 HTTP/HTTPS；与 SOCKS 同一个端口的就跳过，别白等一次超时
-  for en in HTTPSEnable HTTPEnable; do
-    [ "$(sp_field "$en")" = "1" ] || continue
-    if [ "$en" = "HTTPSEnable" ]; then hp="HTTPSProxy"; pp="HTTPSPort"; else hp="HTTPProxy"; pp="HTTPPort"; fi
-    host="$(sp_field "$hp")"; port="$(sp_field "$pp")"
-    [ -n "$host" ] && [ -n "$port" ] || continue
-    [ -n "$socks" ] && [ "$socks" = "socks5h://${host}:${port}" ] && continue
-    printf 'http://%s:%s\n' "$host" "$port"
-  done
-}
-
-# 只在真的要调 Codex 时才解析代理：--check / --validate-only 不该被网络卡住。
 resolve_proxy() {
-  local candidates="" sys_candidates="" cand v seen=" "
-
-  if [ -n "${ASTRA_PROXY:-}" ]; then
-    # 显式指定就完全信用户：连不通直接退出，不偷偷回退到别的候选。
-    if proxy_alive "$ASTRA_PROXY"; then
-      PROXY="$ASTRA_PROXY"; PROXY_SOURCE="ASTRA_PROXY"
-    else
-      echo "ERROR: ASTRA_PROXY 指定的代理连不通 $PROBE_URL" >&2
-      echo "       检查代理是否在跑、地址是否正确；或 unset ASTRA_PROXY 让它自动探测。" >&2
-      exit 1
-    fi
-  else
-    sys_candidates="$(system_proxy_candidates)"
-    candidates="$sys_candidates"
-    for v in "${HTTPS_PROXY:-}" "${https_proxy:-}" "${HTTP_PROXY:-}" "${http_proxy:-}" "${ALL_PROXY:-}" "${all_proxy:-}"; do
-      [ -n "$v" ] && candidates+="${candidates:+$'\n'}${v}"
-    done
-    while IFS= read -r cand; do
-      [ -n "$cand" ] || continue
-      case "$seen" in *" $cand "*) continue ;; esac
-      seen="${seen}${cand} "
-      if proxy_alive "$cand"; then
-        PROXY="$cand"
-        case "
-$sys_candidates
-" in
-          *"
-$cand
-"*) PROXY_SOURCE="macOS 系统代理" ;;
-          *) PROXY_SOURCE="环境变量" ;;
-        esac
-        break
-      fi
-    done <<EOF
-$candidates
-EOF
-  fi
-
+  PROXY="${ASTRA_PROXY:-${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-${ALL_PROXY:-${all_proxy:-}}}}}}}"
   if [ -z "$PROXY" ]; then
     echo "No usable proxy found" >&2
-    echo "  Codex 需要能访问 ${PROBE_URL}，但所有候选代理都连不上。按序排查：" >&2
-    echo "  1) 显式指定：export ASTRA_PROXY=http://<你的代理地址>:<端口>" >&2
-    echo "  2) 没开系统代理就先打开；macOS 上用 scutil --proxy 看当前端口。" >&2
-    echo "  3) 注意宿主注入的代理环境变量——它可能存在但并不真的通。" >&2
+    echo "  Codex 要连 ${PROBE_URL}，但这里没有任何代理变量。按序排查：" >&2
+    echo "  1) macOS: scutil --proxy 查系统代理端口，再 export ASTRA_PROXY=<地址>" >&2
+    echo "  2) 多数翻墙客户端的混合端口只认 SOCKS：socks5h://127.0.0.1:<端口>" >&2
+    echo "  3) 宿主注入的变量可能『存在但不通』（典型症状 502），unset 掉再显式设" >&2
     exit 1
   fi
-
-  # 六个代理变量统一指向同一个值，绕过类变量一律清空。
-  # 只报来源不打印完整地址（地址里可能含凭据）。
+  PROXY_KIND="ASTRA_PROXY"
+  [ -z "${ASTRA_PROXY:-}" ] && PROXY_KIND="环境变量"
+  # 六个代理变量统一指向同一个值，绕过类变量一律清空
   export HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY" ALL_PROXY="$PROXY"
   export http_proxy="$PROXY" https_proxy="$PROXY" all_proxy="$PROXY"
   unset NO_PROXY no_proxy
-  echo "[代理] 来源: ${PROXY_SOURCE}"
+  # 只报来源不报地址：地址里可能带凭据
+  echo "[代理] 已就位，来源: ${PROXY_KIND}"
 }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -372,7 +285,7 @@ post_process "$OUT/PLAN.md" "$OUT"; vrc=$?
   echo "model=$MODEL"
   echo "effort=$EFFORT"
   # 只记来源不记地址：代理地址里可能带凭据，不该落进任何产物文件
-  echo "proxy=${PROXY_SOURCE}"
+  echo "proxy=${PROXY_KIND}"
   # 按记录数统计（与 awk 'END{print NR}' 一致），避免末尾无换行时差一行
   # 按记录数统计（与 awk 'END{print NR}' 一致），避免末尾无换行时差一行
   echo "plan_lines=$(awk 'END{print NR+0}' "$OUT/PLAN.md" 2>/dev/null)"

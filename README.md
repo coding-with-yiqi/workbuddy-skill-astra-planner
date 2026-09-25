@@ -23,9 +23,9 @@
 | Bash 4+ / macOS 或 Linux | 必需 | 脚本主体 |
 | [Codex CLI](https://github.com/openai/codex) `codex` | 必需 | 需在 `PATH` 里，版本 ≥ 0.155；`~/.codex/config.toml` 里默认模型设为 `gpt-6-astra` |
 | 能访问 `chatgpt.com` 的网络 | 必需 | 通常需要代理，见下 |
-| `curl` | 必需 | 只用来探测候选代理哪个真能通 |
+| `curl` | 排错用 | 只在验证代理能不能通时需要 |
 | Git | 可选 | 只在本仓库的安装/打包环节用到 |
-| `scutil` | 可选 | macOS 自带，用来读系统代理；没有也能跑，退化为读环境变量 |
+| `scutil` | 可选 | macOS 自带，用来查系统代理端口；没有也能跑 |
 | `zip` | 可选 | 只用得到 `scripts/package.sh` |
 
 ## 安装
@@ -40,48 +40,26 @@ mkdir -p "${WORKBUDDY_SKILLS_DIR:-$HOME/.workbuddy/skills}"
 cp -R workbuddy-skill-astra-planner "${WORKBUDDY_SKILLS_DIR:-$HOME/.workbuddy/skills}/astra-planner"
 ```
 
-## 配置代理（大多数时候不用配）
+## 配置代理（开工前必做）
 
-Codex 要连 `chatgpt.com`，这一步离不开代理，但**脚本会自己挑**，不用你先把端口抄进某个文件。它按这个顺序找，并且每个候选都真的连一次 `chatgpt.com` 验证能通，用第一个通的：
-
-1. `ASTRA_PROXY` —— 你显式指定的，最优先
-2. macOS 系统代理（`scutil --proxy` 读出来的那个）
-3. 标准环境变量：`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`（含小写形式）
-
-**为什么不直接用环境变量？** 因为宿主环境常常往 shell 里注入自己的代理变量，而那个代理未必真能通（典型症状：连上就 502）。只信环境变量，你会卡在一个"配置看起来齐全、却怎么都跑不通"的状态里，而且不知道为什么。
-
-### 装完先跑一次看看
+Codex 要连 `chatgpt.com`，离不开代理。**脚本不会替你探测哪个代理能通** —— 这件事因机器而异，写死在脚本里就是替你猜。这一步由你（或你的 AI 助手）来做，脚本只负责用你给的那个。
 
 ```bash
-# 第 0 步：确认自己这台机器有没有系统代理、端口是多少（macOS）
+# 1. 看这台机器的代理（macOS）
 scutil --proxy
 
-# 然后直接跑，什么都不用配
-SKILL="${WORKBUDDY_SKILLS_DIR:-$HOME/.workbuddy/skills}/astra-planner"
-bash "$SKILL/scripts/ask_gpt.sh" /tmp/task.md .astra
-# 正常时会看到一行：[代理] 来源: macOS 系统代理
+# 2. 设好再跑。多数翻墙客户端是混合端口，必须用 socks5h://
+export ASTRA_PROXY=socks5h://127.0.0.1:<端口>
+
+# 3. 验一次：看到 403 就说明通了（chatgpt.com 会拒绝 curl，但代理是好的）
+curl --proxy "$ASTRA_PROXY" --max-time 8 -sS -o /dev/null -w '%{http_code}\n' https://chatgpt.com/
 ```
 
-### 什么时候才需要手动指定
+- 也可以用标准变量 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`；脚本按顺序取第一个非空值，`ASTRA_PROXY` 优先。
+- **别直接用宿主注入的代理变量** —— 它常常"存在但不通"（典型症状 502）。
+- 没有任何代理变量时，脚本打印 `No usable proxy found` 并退出，不会调用 Codex。
+- 完整排查清单见 `SKILL.md` 的「开工前：先把代理接通」。
 
-Linux、CI，或者你的代理端口是手工起的、不在系统设置里：
-
-```bash
-export ASTRA_PROXY=http://<你的代理地址>:<端口>     # 建议写进 shell profile
-```
-
-两点要注意：
-
-- 别把宿主环境（比如工作台）注入的那六个代理变量原样搬来用 —— 它们可能存在但并不通。脚本只把它们当**兜底候选**，不是首选。
-- 一旦设了 `ASTRA_PROXY`，脚本就完全信你：连不通会直接报错退出，不会偷偷回退到别的代理。想回到自动探测，`unset ASTRA_PROXY`。
-
-### 全都连不通时
-
-脚本打印 `No usable proxy found` 并退出，按这个顺序排查：
-
-1. 显式指定：`export ASTRA_PROXY=http://<你的代理地址>:<端口>`
-2. 系统代理没开就打开；macOS 上用 `scutil --proxy` 看当前端口
-3. 检查是不是被注入了一个"存在但其实不通"的环境变量
 
 ## 用法
 
@@ -124,7 +102,7 @@ bash "$SKILL/scripts/package.sh" [输出目录]
 | --- | --- | --- |
 | `ASTRA_MODEL` | `gpt-6-astra` | 模型 |
 | `ASTRA_EFFORT` | `xhigh` | 推理档位 |
-| `ASTRA_PROXY` | 留空 = 自动探测 | 显式代理地址；**设了就只用它**，连不通直接报错不回退 |
+| `ASTRA_PROXY` | 留空则用环境变量 | 显式代理地址；优先于所有标准变量 |
 | `ASTRA_SANDBOX` | `read-only` | Codex 沙箱策略 |
 | `ASTRA_EPHEMERAL` | 不设（会话落盘） | 设为 `1` 则不保留会话 |
 | `CODEX_BIN` | 按 `PATH` 查找 `codex` | 也识别 `ASTRA_CODEX_BIN`，方便测试注入假 codex |
