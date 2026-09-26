@@ -3,7 +3,7 @@ name: astra-planner
 description: 动手前先用 Codex CLI 的 Astra 模型(gpt-6-astra)把任务编译成「傻瓜级方案 + 可运行的自检 harness + 可机器判定的成功标准」，拿到之后再照方案执行。用户要求任何实质性任务开工前先跑一遍；触发词包括「问 Astra」「先规划一下」「开工前」「astra」「make a plan」。
 description_zh: "开工前用 Astra 编译方案与自检 harness，再照方案执行"
 description_en: "Compile a foolproof plan + self-verification harness via Codex Astra before executing any real task"
-version: 1.2.3
+version: 1.2.4
 display_name: "astra-planner"
 display_name_en: "astra-planner"
 visibility: "public"
@@ -78,38 +78,16 @@ harness 运行时 cwd = 输出目录，并导出 `ASTRA_OUT`（输出目录）�
 4. 模具清单里的东西要真的落盘，不能只在方案里提一句。
 5. 对用户说"我在问 Astra"，不要说"在跑脚本"或"在调 Codex"。
 
-## 开工前：先把代理接通（你的活，脚本不猜）
+## 连 Codex 这件事，归你自己的机器
 
-Codex 要连 `chatgpt.com`，必须有能出网的代理。**找代理这件事由你（执行者）负责**，脚本不会替你探测 —— 哪个代理能通完全因机器而异（混合端口只认 SOCKS、宿主注入的变量可能 502、公司代理要认证…），写死在脚本里就是替用户猜，猜错了反而更难查。
+脚本需要调用本机的 `codex` CLI，并且要能连到 `chatgpt.com`。**怎么连上由你这台机器自己决定** —— 代理、端口、认证都是你的事，脚本不替你猜（不同机器差别太大，写死进去只会猜错）。
 
-按顺序做：
+脚本只做这件事：按顺序取第一个非空的代理变量（`ASTRA_PROXY` > 标准环境变量），统一导出给 Codex；一个都没有就打印 `No usable proxy found` 并退出，**不会调用 Codex**。
 
-1. **看这台机器有什么代理**
-   - macOS：`scutil --proxy`
-   - 通用：`env | grep -i proxy`
+所以开工前你只要保证两点：
 
-2. **选对形式**：多数翻墙客户端把 HTTP / HTTPS / SOCKS 指向同一个混合端口，这种端口**必须用 `socks5h://`**（写成 `http://` 会直接超时）：
-
-   ```bash
-   export ASTRA_PROXY=socks5h://127.0.0.1:<端口>
-   ```
-
-3. **验一次再开工**（这一步你做，脚本不做）：
-
-   ```bash
-   curl --proxy "$ASTRA_PROXY" --max-time 8 -sS -o /dev/null -w '%{http_code}\n' https://chatgpt.com/
-   ```
-
-   - `403` = 通了（chatgpt.com 会拒绝 curl，但说明代理是好的）
-   - `000` / `502` / 超时 = 不通，换端口或换形式
-
-4. 然后照常跑 `ask_gpt.sh`。
-
-踩过的坑：
-
-- **宿主会注入自己的代理变量，而它常常"存在但不通"**（工作台注入的那个就是，连上就 502）。别直接用，显式设 `ASTRA_PROXY` 覆盖它。
-- 脚本拿到 `ASTRA_PROXY` 就完全信你，不会自作主张换别的；想回到环境变量就 `unset ASTRA_PROXY`。
-- 没有任何代理变量时，脚本打印 `No usable proxy found` 并退出，**不会调用 Codex**，不会白跑一次编译。
+1. `codex` 命令在 PATH 里、能跑
+2. 有代理变量，或者自己 `export ASTRA_PROXY=<你这台机器能用的代理>`
 
 
 ## 排错

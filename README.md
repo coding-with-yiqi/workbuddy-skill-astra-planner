@@ -23,9 +23,7 @@
 | Bash 4+ / macOS 或 Linux | 必需 | 脚本主体 |
 | [Codex CLI](https://github.com/openai/codex) `codex` | 必需 | 需在 `PATH` 里，版本 ≥ 0.155；`~/.codex/config.toml` 里默认模型设为 `gpt-6-astra` |
 | 能访问 `chatgpt.com` 的网络 | 必需 | 通常需要代理，见下 |
-| `curl` | 排错用 | 只在验证代理能不能通时需要 |
 | Git | 可选 | 只在本仓库的安装/打包环节用到 |
-| `scutil` | 可选 | macOS 自带，用来查系统代理端口；没有也能跑 |
 | `zip` | 可选 | 只用得到 `scripts/package.sh` |
 
 ## 安装
@@ -40,25 +38,15 @@ mkdir -p "${WORKBUDDY_SKILLS_DIR:-$HOME/.workbuddy/skills}"
 cp -R workbuddy-skill-astra-planner "${WORKBUDDY_SKILLS_DIR:-$HOME/.workbuddy/skills}/astra-planner"
 ```
 
-## 配置代理（开工前必做）
+## 连 Codex 这件事，归你自己的机器
 
-Codex 要连 `chatgpt.com`，离不开代理。**脚本不会替你探测哪个代理能通** —— 这件事因机器而异，写死在脚本里就是替你猜。这一步由你（或你的 AI 助手）来做，脚本只负责用你给的那个。
+脚本要调本机的 `codex` CLI，并连到 `chatgpt.com`。**怎么连上由你这台机器自己决定** —— 代理、端口、认证都归你，脚本不替你猜。
+
+脚本只负责：取第一个非空的代理变量（`ASTRA_PROXY` 优先，其次是标准环境变量），统一导出给 Codex；一个都没有就打印 `No usable proxy found` 并退出。
 
 ```bash
-# 1. 看这台机器的代理（macOS）
-scutil --proxy
-
-# 2. 设好再跑。多数翻墙客户端是混合端口，必须用 socks5h://
-export ASTRA_PROXY=socks5h://127.0.0.1:<端口>
-
-# 3. 验一次：看到 403 就说明通了（chatgpt.com 会拒绝 curl，但代理是好的）
-curl --proxy "$ASTRA_PROXY" --max-time 8 -sS -o /dev/null -w '%{http_code}\n' https://chatgpt.com/
+export ASTRA_PROXY=<你这台机器能用的代理>
 ```
-
-- 也可以用标准变量 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`；脚本按顺序取第一个非空值，`ASTRA_PROXY` 优先。
-- **别直接用宿主注入的代理变量** —— 它常常"存在但不通"（典型症状 502）。
-- 没有任何代理变量时，脚本打印 `No usable proxy found` 并退出，不会调用 Codex。
-- 完整排查清单见 `SKILL.md` 的「开工前：先把代理接通」。
 
 
 ## 用法

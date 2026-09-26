@@ -34,10 +34,9 @@ resolve_proxy() {
   PROXY="${ASTRA_PROXY:-${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-${ALL_PROXY:-${all_proxy:-}}}}}}}"
   if [ -z "$PROXY" ]; then
     echo "No usable proxy found" >&2
-    echo "  Codex 要连 ${PROBE_URL}，但这里没有任何代理变量。按序排查：" >&2
-    echo "  1) macOS: scutil --proxy 查系统代理端口，再 export ASTRA_PROXY=<地址>" >&2
-    echo "  2) 多数翻墙客户端的混合端口只认 SOCKS：socks5h://127.0.0.1:<端口>" >&2
-    echo "  3) 宿主注入的变量可能『存在但不通』（典型症状 502），unset 掉再显式设" >&2
+    echo "  Codex CLI 要能连到 ${PROBE_URL}，但这里没拿到任何代理变量。" >&2
+    echo "  你这台机器怎么连出去（代理、端口、认证）由你自己决定，脚本不替你猜；" >&2
+    echo "  连好之后 export ASTRA_PROXY=<你自己的代理> 再跑就行。" >&2
     exit 1
   fi
   PROXY_KIND="ASTRA_PROXY"
